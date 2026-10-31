@@ -1,0 +1,1485 @@
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  ArrowDown,
+  ArrowRight,
+  ArrowUpRight,
+  Bookmark,
+  Check,
+  ChevronLeft,
+  ChevronRight,
+  Copy,
+  Download,
+  ExternalLink,
+  Globe2,
+  Github,
+  Grid2X2,
+  Info,
+  ImagePlus,
+  Layers2,
+  LayoutPanelLeft,
+  LoaderCircle,
+  PersonStanding,
+  Plus,
+  RotateCcw,
+  Search,
+  Shirt,
+  Sparkles,
+  UserRound,
+  X,
+} from 'lucide-react';
+import { AnimaActions } from './anima-ui';
+import { copy } from './i18n';
+import { HeroStudy } from './hero-study';
+import { withPoseDepth } from './pose-depth';
+import { Modal, RemoteImage } from './ui';
+import { GenerationDialog, ImageSettings, ImageSettingsButton } from './generation-ui';
+import { generationCopy } from './generation-copy';
+import {
+  defaultImageConfig,
+  generateReferenceImage,
+  ImageGenerationError,
+  loadImageConfig,
+  referencePrompt,
+  validateCharacterFile,
+} from './generation';
+import type { CharacterImageReference, GenerationJob, ImageReference } from './generation';
+import { angles, copyText, matchesQuery, sortItems, storageGet, storageSet } from './library';
+import type { Sort, View } from './library';
+import type { Catalog, Lang, Reference, Variant } from './types';
+
+type Board = { pose?: string; costume?: string; character?: string };
+const initialParams = new URLSearchParams(window.location.search);
+const isLanguage = (v: unknown): v is Lang => v === 'zh' || v === 'en';
+const isIds = (v: unknown): v is string[] =>
+  Array.isArray(v) && v.every((id) => typeof id === 'string');
+const isBoard = (v: unknown): v is Board =>
+  !!v &&
+  typeof v === 'object' &&
+  !Array.isArray(v) &&
+  ['pose', 'costume', 'character'].every(
+    (k) => !(k in v) || typeof (v as Record<string, unknown>)[k] === 'string',
+  );
+const viewParam = initialParams.get('view');
+
+export default function App() {
+  const [lang, setLang] = useState<Lang>(() => {
+    const value = initialParams.get('lang');
+    return isLanguage(value)
+      ? value
+      : storageGet('opc-language', navigator.language.startsWith('zh') ? 'zh' : 'en', isLanguage);
+  });
+  const t = copy[lang];
+  const [catalog, setCatalog] = useState<Catalog | null>(null);
+  const [failed, setFailed] = useState(false);
+  const [reload, setReload] = useState(0);
+  const [view, setView] = useState<View>(
+    ['pose', 'costume', 'character', 'saved'].includes(viewParam || '')
+      ? (viewParam as View)
+      : 'all',
+  );
+  const [query, setQuery] = useState(initialParams.get('q') || '');
+  const [category, setCategory] = useState(initialParams.get('category') || 'all');
+  const [hair, setHair] = useState(initialParams.get('hair') || 'all');
+  const [extended, setExtended] = useState(initialParams.get('extended') === '1');
+  const [poseDepth, setPoseDepth] = useState(initialParams.get('depth') === '1');
+  const [angle, setAngle] = useState<string>(
+    angles.includes(initialParams.get('angle') as (typeof angles)[number])
+      ? initialParams.get('angle')!
+      : 'front',
+  );
+  const [cardAngles, setCardAngles] = useState<Record<string, string>>({});
+  const [sort, setSort] = useState<Sort>('curated');
+  const [limit, setLimit] = useState(24);
+  const [saved, setSaved] = useState(() => storageGet('opc-saved', [], isIds));
+  const [board, setBoard] = useState<Board>(() => storageGet('opc-board', {}, isBoard));
+  const [characterReference, setCharacterReference] = useState<CharacterImageReference | null>(
+    null,
+  );
+  const [characterLoading, setCharacterLoading] = useState(false);
+  const [characterError, setCharacterError] = useState('');
+  const characterInput = useRef<HTMLInputElement>(null);
+  const characterTask = useRef(0);
+  const [panel, setPanel] = useState<'board' | 'about' | 'settings' | null>(null);
+  const [imageConfig, setImageConfig] = useState(loadImageConfig);
+  const [generationJob, setGenerationJob] = useState<GenerationJob | null>(null);
+  const generationController = useRef<AbortController | null>(null);
+  const imageReady = !!(imageConfig.baseUrl && imageConfig.apiKey && imageConfig.model);
+  const [selectedId, setSelectedId] = useState<string | null>(initialParams.get('item'));
+  const [detailAngle, setDetailAngle] = useState(initialParams.get('detailAngle') || angle);
+  const [toast, setToast] = useState('');
+  const [downloadBusy, setDownloadBusy] = useState(false);
+  const downloadController = useRef<AbortController | null>(null);
+  const searchRef = useRef<HTMLInputElement>(null);
+  const toastTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    setFailed(false);
+    fetch(`${import.meta.env.BASE_URL}data/catalog.json`, { signal: controller.signal })
+      .then((res) => {
+        if (!res.ok) throw Error(`HTTP ${res.status}`);
+        return res.json() as Promise<Catalog>;
+      })
+      .then((data) => {
+        if (!data.items?.length || !data.stats) throw Error('Invalid reference catalog');
+        setCatalog(data);
+      })
+      .catch((error) => {
+        if (error.name !== 'AbortError') setFailed(true);
+      });
+    return () => controller.abort();
+  }, [reload]);
+  useEffect(() => {
+    document.documentElement.lang = lang === 'zh' ? 'zh-CN' : 'en';
+    document.title =
+      lang === 'zh'
+        ? 'Open Pose & Costume · 姿势与服装参考库'
+        : 'Open Pose & Costume · Reference studio';
+    storageSet('opc-language', lang);
+  }, [lang]);
+  useEffect(() => {
+    storageSet('opc-saved', saved);
+  }, [saved]);
+  useEffect(() => {
+    storageSet('opc-board', board);
+  }, [board]);
+  useEffect(() => {
+    setLimit(24);
+  }, [query, view, category, hair, extended, sort]);
+  useEffect(() => () => clearTimeout(toastTimer.current), []);
+  useEffect(() => () => generationController.current?.abort(), []);
+  useEffect(() => () => downloadController.current?.abort(), []);
+  useEffect(
+    () => () => {
+      characterTask.current++;
+    },
+    [],
+  );
+  useEffect(() => {
+    const preview = characterReference?.variant.image;
+    return () => {
+      if (preview?.startsWith('blob:')) URL.revokeObjectURL(preview);
+    };
+  }, [characterReference]);
+  useEffect(() => {
+    const url = new URL(window.location.href);
+    url.search = '';
+    const params: Record<string, string> = {
+      lang,
+      view,
+      ...(query ? { q: query } : {}),
+      ...(category !== 'all' ? { category } : {}),
+      ...(extended ? { extended: '1' } : {}),
+      ...(poseDepth ? { depth: '1' } : {}),
+      ...(hair !== 'all' ? { hair } : {}),
+      ...(angle !== 'front' ? { angle } : {}),
+      ...(selectedId ? { item: selectedId, detailAngle } : {}),
+    };
+    for (const [key, value] of Object.entries(params)) url.searchParams.set(key, value);
+    window.history.replaceState(null, '', url);
+  }, [lang, view, query, category, hair, extended, poseDepth, angle, selectedId, detailAngle]);
+
+  const notify = useCallback((message: string) => {
+    setToast(message);
+    clearTimeout(toastTimer.current);
+    toastTimer.current = setTimeout(() => setToast(''), 2600);
+  }, []);
+  const items = useMemo(
+    () => (catalog?.items || []).map((item) => (poseDepth ? withPoseDepth(item) : item)),
+    [catalog, poseDepth],
+  );
+  const eligible = useMemo(
+    () => items.filter((item) => extended || !item.extended),
+    [items, extended],
+  );
+  const byView = useMemo(
+    () =>
+      eligible.filter(
+        (item) =>
+          view === 'all' || (view === 'saved' ? saved.includes(item.id) : item.kind === view),
+      ),
+    [eligible, view, saved],
+  );
+  const categories = useMemo(() => {
+    const map = new Map<string, { label: string; count: number }>();
+    for (const item of byView) {
+      const existing = map.get(item.category.id);
+      map.set(item.category.id, { label: item.category[lang], count: (existing?.count || 0) + 1 });
+    }
+    return [...map.entries()];
+  }, [byView, lang]);
+  const visible = useMemo(
+    () =>
+      sortItems(
+        byView.filter(
+          (item) =>
+            (category === 'all' || item.category.id === category) &&
+            (hair === 'all' || item.portrait?.hair === hair) &&
+            matchesQuery(item, query),
+        ),
+        sort,
+        lang,
+      ),
+    [byView, category, hair, query, sort, lang],
+  );
+  const selected = items.find((item) => item.id === selectedId);
+  const selectedIndex = selected ? visible.findIndex((item) => item.id === selected.id) : -1;
+  const variant = selected?.variants.find((v) => v.angle === detailAngle) || selected?.variants[0];
+  const boardPose = items.find((item) => item.id === board.pose && item.kind === 'pose');
+  const boardCostume = items.find((item) => item.id === board.costume && item.kind === 'costume');
+  const boardCharacter = items.find(
+    (item) => item.id === board.character && item.kind === 'character',
+  );
+  const activeCharacter: ImageReference | null =
+    characterReference ||
+    (boardCharacter
+      ? {
+          kind: 'character',
+          title: boardCharacter.title,
+          keywords: boardCharacter.keywords,
+          variant: boardCharacter.variants[0],
+        }
+      : null);
+  const boardCount = Number(!!boardPose) + Number(!!boardCostume) + Number(!!activeCharacter);
+  const onBoard = (item: Reference) =>
+    item.kind === 'character'
+      ? !characterReference && board.character === item.id
+      : board[item.kind] === item.id;
+  const boardPrompt =
+    boardPose && boardCostume
+      ? `${t.promptStart}${boardPose.title[lang]}${t.promptCostume}${boardCostume.keywords[lang]}${t.promptEnd}${activeCharacter ? t.promptCharacter : ''}`
+      : '';
+  const navItems = [
+    { key: 'all' as const, label: t.all, icon: Grid2X2, count: eligible.length },
+    {
+      key: 'pose' as const,
+      label: t.pose,
+      icon: PersonStanding,
+      count: eligible.filter((item) => item.kind === 'pose').length,
+    },
+    {
+      key: 'costume' as const,
+      label: t.costume,
+      icon: Shirt,
+      count: eligible.filter((item) => item.kind === 'costume').length,
+    },
+    {
+      key: 'character' as const,
+      label: t.character,
+      icon: UserRound,
+      count: eligible.filter((item) => item.kind === 'character').length,
+    },
+    {
+      key: 'saved' as const,
+      label: t.saved,
+      icon: Bookmark,
+      count: eligible.filter((item) => saved.includes(item.id)).length,
+    },
+  ];
+  const pageTitle = navItems.find((item) => item.key === view)!.label;
+
+  function changeView(next: View) {
+    setView(next);
+    setCategory('all');
+    setHair('all');
+    setQuery('');
+  }
+  function resetFilters() {
+    setCategory('all');
+    setHair('all');
+    setQuery('');
+    setSort('curated');
+  }
+  function save(item: Reference) {
+    const exists = saved.includes(item.id);
+    setSaved((old) => (exists ? old.filter((id) => id !== item.id) : [...old, item.id]));
+    notify(exists ? t.removedToast : t.savedToast);
+  }
+  function addToBoard(item: Reference) {
+    if (item.kind === 'character') {
+      characterTask.current++;
+      setCharacterLoading(false);
+      setCharacterReference(null);
+      setCharacterError('');
+    }
+    setBoard((old) => ({ ...old, [item.kind]: onBoard(item) ? undefined : item.id }));
+    notify(t.boardToast);
+  }
+  function openDetail(item: Reference) {
+    setDetailAngle(cardAngles[item.id] || angle);
+    setSelectedId(item.id);
+  }
+  function setCardAngle(id: string, value: string) {
+    setCardAngles((current) => (current[id] === value ? current : { ...current, [id]: value }));
+  }
+  const step = useCallback(
+    (direction: number) => {
+      const next = visible[selectedIndex + direction];
+      if (selectedIndex >= 0 && next) setSelectedId(next.id);
+    },
+    [visible, selectedIndex],
+  );
+  const closeDetail = useCallback(() => setSelectedId(null), []);
+  async function clipboard(value: string) {
+    try {
+      await copyText(value);
+      notify(t.copied);
+    } catch {
+      notify(t.copyFailed);
+    }
+  }
+  async function downloadOriginal(item: Reference, chosenVariant: Variant) {
+    if (downloadController.current) return;
+    const controller = new AbortController();
+    downloadController.current = controller;
+    setDownloadBusy(true);
+    try {
+      const response = await fetch(chosenVariant.original, {
+        signal: AbortSignal.any([controller.signal, AbortSignal.timeout(60_000)]),
+        credentials: 'omit',
+        referrerPolicy: 'no-referrer',
+      });
+      if (!response.ok) throw Error('Download failed');
+      const blob = await response.blob();
+      const extensions: Record<string, string> = {
+        'image/png': 'png',
+        'image/jpeg': 'jpg',
+        'image/webp': 'webp',
+      };
+      const extension = extensions[blob.type];
+      if (!extension || !blob.size) throw Error('Invalid image');
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `${item.id}-${chosenVariant.angle}.${extension}`;
+      (document.querySelector('dialog[open]') || document.body).appendChild(link);
+      link.click();
+      link.remove();
+      // Give the browser time to start reading the file before releasing it.
+      setTimeout(() => URL.revokeObjectURL(url), 60_000);
+      notify(t.downloadStarted);
+    } catch {
+      if (!controller.signal.aborted) notify(t.downloadFailed);
+    } finally {
+      if (downloadController.current === controller) {
+        downloadController.current = null;
+        setDownloadBusy(false);
+      }
+    }
+  }
+  function closeGeneration() {
+    generationController.current?.abort();
+    generationController.current = null;
+    setGenerationJob(null);
+  }
+  async function runGeneration(references: ImageReference[], prompt: string) {
+    generationController.current?.abort();
+    const controller = new AbortController();
+    generationController.current = controller;
+    const model = imageConfig.model.trim();
+    setGenerationJob({ model, references, prompt, status: 'loading' });
+    try {
+      const result = await generateReferenceImage(
+        imageConfig,
+        references,
+        prompt,
+        controller.signal,
+      );
+      if (generationController.current === controller)
+        setGenerationJob({ model, references, prompt, status: 'success', result });
+    } catch (failure) {
+      if (generationController.current !== controller || controller.signal.aborted) return;
+      const t = generationCopy[lang];
+      const code = failure instanceof ImageGenerationError ? failure.code : 'networkFailed';
+      const summary = t[code as keyof typeof t] || t.networkFailed;
+      const detail = failure instanceof ImageGenerationError ? failure.message : '';
+      setGenerationJob({
+        model,
+        references,
+        prompt,
+        status: 'error',
+        error: `${summary}${detail ? `\n${detail}` : ''}`,
+      });
+    }
+  }
+  async function selectCharacter(file: File) {
+    const task = ++characterTask.current;
+    setCharacterLoading(true);
+    setCharacterError('');
+    let preview = '';
+    try {
+      await validateCharacterFile(file);
+      preview = URL.createObjectURL(file);
+      const image = new Image();
+      image.src = preview;
+      await image.decode();
+      if (task !== characterTask.current) return;
+      setBoard((old) => ({ ...old, character: undefined }));
+      setCharacterReference({
+        kind: 'character',
+        file,
+        title: { zh: '人物参考', en: 'Character reference' },
+        keywords: {
+          zh: '保留所附人物的五官、脸型、发型发色、肤色、体型比例与画风',
+          en: 'Preserve the attached character’s face, hairstyle, hair color, skin tone, proportions and visual style',
+        },
+        variant: {
+          id: 'character-upload',
+          angle: 'front',
+          label: { zh: '人物', en: 'Character' },
+          thumbnail: preview,
+          image: preview,
+          original: preview,
+        },
+      });
+      preview = ''; // Ownership passes to the reference cleanup effect.
+    } catch (error) {
+      if (task === characterTask.current)
+        setCharacterError(error instanceof ImageGenerationError ? error.code : 'characterInvalid');
+    } finally {
+      if (preview?.startsWith('blob:')) URL.revokeObjectURL(preview);
+      if (task === characterTask.current) setCharacterLoading(false);
+    }
+  }
+  function beginGeneration(item?: Reference) {
+    if (characterLoading) return;
+    const references: ImageReference[] = [];
+    const add = (value: Reference | undefined, chosenVariant = value?.variants[0]) => {
+      if (value && chosenVariant)
+        references.push({
+          kind: value.kind,
+          title: value.title,
+          keywords: value.keywords,
+          variant: chosenVariant,
+        });
+    };
+    const pose = item?.kind === 'pose' ? item : boardPose;
+    const costume = item?.kind === 'costume' ? item : boardCostume;
+    if (!pose || !costume) {
+      if (item) {
+        if (item.kind === 'character') {
+          characterTask.current++;
+          setCharacterReference(null);
+          setCharacterError('');
+        }
+        setBoard((old) => ({ ...old, [item.kind]: item.id }));
+      }
+      setSelectedId(null);
+      setPanel('board');
+      notify(generationCopy[lang].chooseReferences);
+      return;
+    }
+    add(
+      pose,
+      pose.variants.find(
+        (value) => value.angle === (item?.kind === 'pose' ? detailAngle : 'front'),
+      ) || pose.variants[0],
+    );
+    add(costume);
+    if (item?.kind === 'character') add(item);
+    else if (activeCharacter) references.push(activeCharacter);
+    void runGeneration(references, referencePrompt(references, lang));
+  }
+  useEffect(() => {
+    const handle = (event: KeyboardEvent) => {
+      const isEditing =
+        event.target instanceof HTMLElement &&
+        (['INPUT', 'TEXTAREA', 'SELECT'].includes(event.target.tagName) ||
+          event.target.isContentEditable);
+      if (isEditing || generationJob) return;
+      if (selectedId) {
+        if (event.key === 'ArrowLeft') {
+          event.preventDefault();
+          step(-1);
+        }
+        if (event.key === 'ArrowRight') {
+          event.preventDefault();
+          step(1);
+        }
+      } else if (!panel && event.key === '/') {
+        event.preventDefault();
+        searchRef.current?.focus();
+      }
+    };
+    document.addEventListener('keydown', handle);
+    return () => document.removeEventListener('keydown', handle);
+  }, [selectedId, panel, step, generationJob]);
+
+  return (
+    <div className="app-shell">
+      <aside className="sidebar">
+        <a
+          className="brand"
+          href={import.meta.env.BASE_URL}
+          onClick={(e) => {
+            e.preventDefault();
+            changeView('all');
+            window.scrollTo({ top: 0, behavior: 'smooth' });
+          }}
+        >
+          <span className="brand-mark">
+            <img
+              src={`${import.meta.env.BASE_URL}brand/logo-mark.png`}
+              alt=""
+              width={44}
+              height={44}
+            />
+          </span>
+          <span>
+            <strong>
+              open<span className="brand-dot">.</span>
+            </strong>
+            <span className="brand-sub">POSE & COSTUME</span>
+          </span>
+        </a>
+        <p className="nav-heading">{t.library}</p>
+        <nav className="main-nav" aria-label={t.library}>
+          {navItems.map(({ key, label, icon: Icon, count }) => (
+            <button
+              key={key}
+              className={view === key ? 'nav-item active' : 'nav-item'}
+              aria-current={view === key ? 'page' : undefined}
+              onClick={() => changeView(key)}
+            >
+              <Icon size={19} />
+              <span>{label}</span>
+              <small>{count.toLocaleString(lang)}</small>
+            </button>
+          ))}
+        </nav>
+        <div className="sidebar-divider" />
+        <p className="nav-heading">{t.workspace}</p>
+        <button
+          className={`nav-item board-nav ${panel === 'board' ? 'active' : ''}`}
+          onClick={() => setPanel('board')}
+        >
+          <LayoutPanelLeft size={19} />
+          <span>{t.board}</span>
+          <small>{boardCount}/3</small>
+        </button>
+        <div className="board-invitation">
+          <div className="mini-pair">
+            <span>
+              <PersonStanding size={27} />
+            </span>
+            <Plus size={13} />
+            <span>
+              <Shirt size={25} />
+            </span>
+          </div>
+          <p>{t.boardHint}</p>
+          <button onClick={() => setPanel('board')}>
+            {t.boardOpen}
+            <ArrowUpRight size={14} />
+          </button>
+        </div>
+        <div className="sidebar-bottom">
+          <div className="content-switch">
+            <label>
+              <input
+                type="checkbox"
+                checked={extended}
+                onChange={(e) => {
+                  setExtended(e.target.checked);
+                  setCategory('all');
+                }}
+              />
+              <span className="switch-track" />
+              <span>{t.extended}</span>
+            </label>
+            <p>{t.extendedHint}</p>
+          </div>
+          <div className="social-links">
+            <a
+              className="social-link"
+              href="https://x.com/HongyeMain"
+              target="_blank"
+              rel="noopener noreferrer"
+              aria-label={t.xProfile}
+              title={t.xProfile}
+            >
+              <svg
+                width={16}
+                height={16}
+                viewBox="0 0 24 24"
+                fill="currentColor"
+                aria-hidden="true"
+              >
+                <path d="M18.901 1.153h3.68l-8.04 9.19L24 22.846h-7.406l-5.8-7.584-6.64 7.584H.47l8.6-9.835L0 1.154h7.594l5.243 6.932 6.064-6.933ZM17.61 20.645h2.039L6.486 3.24H4.298L17.61 20.645Z" />
+              </svg>
+              @HongyeMain
+              <ArrowUpRight size={14} />
+            </a>
+            <a
+              className="social-link github-link"
+              href="https://github.com/hongye007/open-pose-costume"
+              target="_blank"
+              rel="noopener noreferrer"
+              aria-label={t.githubRepo}
+              title={t.githubRepo}
+            >
+              <Github size={16} />
+              GitHub / open-pose-costume
+              <ArrowUpRight size={14} />
+            </a>
+            <a
+              className="social-link github-link"
+              href="https://github.com/hongye007/open-pose-costume-skill"
+              target="_blank"
+              rel="noopener noreferrer"
+              aria-label={t.skillRepo}
+              title={t.skillRepo}
+            >
+              <Sparkles size={16} />
+              <span>Skill / open-pose-costume-skill</span>
+              <ArrowUpRight size={14} />
+            </a>
+          </div>
+          <span className="local-note">
+            <span />
+            {t.local}
+          </span>
+        </div>
+      </aside>
+
+      <div className="workspace">
+        <header className="topbar">
+          <div className="breadcrumb">
+            <span>{t.library}</span>
+            <ChevronRight size={13} />
+            <strong>{pageTitle}</strong>
+          </div>
+          <div className="header-actions">
+            <ImageSettingsButton
+              lang={lang}
+              ready={imageReady}
+              onClick={() => setPanel('settings')}
+            />
+            <button
+              className="header-board"
+              onClick={() => setPanel('board')}
+              aria-label={t.boardOpen}
+            >
+              <LayoutPanelLeft size={17} />
+              {boardCount > 0 && <small>{boardCount}</small>}
+            </button>
+            <button
+              className="header-source"
+              onClick={() => setPanel('about')}
+              aria-label={t.usage}
+            >
+              <Info size={17} />
+            </button>
+            <button
+              className="language-button"
+              onClick={() => setLang(lang === 'zh' ? 'en' : 'zh')}
+              aria-label={t.language}
+            >
+              <Globe2 size={16} />
+              <span className={lang === 'zh' ? 'current-language' : ''}>中</span>
+              <span className="language-slash">/</span>
+              <span className={lang === 'en' ? 'current-language' : ''}>EN</span>
+            </button>
+            <span className="studio-badge">
+              REFERENCE STUDIO
+              <span />
+            </span>
+          </div>
+        </header>
+
+        <main>
+          <section className="intro" aria-label={t.brand}>
+            <div className="intro-copy">
+              <p className="eyebrow">
+                <span />
+                {t.introLabel}
+              </p>
+              <h1>
+                {t.introA}
+                <br />
+                <em>{t.introB}</em>
+              </h1>
+              <p className="intro-description">{t.introText}</p>
+              <a className="intro-link" href="#collection">
+                {t.introLink}
+                <ArrowDown size={15} />
+              </a>
+            </div>
+            <HeroStudy lang={lang} />
+          </section>
+          <div className="collection-summary">
+            <span>
+              <strong>{catalog?.stats.references.toLocaleString(lang) || '—'}</strong>{' '}
+              {t.referenceCount}
+            </span>
+            <i />
+            <span>
+              <strong>{catalog?.stats.images.toLocaleString(lang) || '—'}</strong> {t.viewCount}
+            </span>
+            <span className="summary-right">
+              <Layers2 size={14} />
+              POSE + COSTUME + CHARACTER
+            </span>
+          </div>
+
+          <section className="collection" id="collection" aria-labelledby="collection-heading">
+            <div className="collection-header">
+              <div>
+                <span className="section-kicker">THE COLLECTION</span>
+                <h2 id="collection-heading">
+                  {pageTitle}
+                  <span>{visible.length.toLocaleString(lang)}</span>
+                </h2>
+              </div>
+              {(view === 'pose' || byView.some((item) => item.kind === 'pose')) && (
+                <label className="pose-depth-switch" title={t.depthHint}>
+                  <span>{t.depth}</span>
+                  <input
+                    type="checkbox"
+                    role="switch"
+                    checked={poseDepth}
+                    onChange={(event) => setPoseDepth(event.target.checked)}
+                  />
+                  <span className="switch-track" aria-hidden="true" />
+                </label>
+              )}
+            </div>
+            <div className="search-row">
+              <div className="search-box">
+                <Search size={19} />
+                <input
+                  ref={searchRef}
+                  type="search"
+                  value={query}
+                  onChange={(e) => setQuery(e.target.value)}
+                  placeholder={t.search}
+                  aria-label={t.search}
+                />
+                {query ? (
+                  <button className="icon-button" aria-label={t.clear} onClick={() => setQuery('')}>
+                    <X size={16} />
+                  </button>
+                ) : (
+                  <kbd>/</kbd>
+                )}
+              </div>
+              <label className="sort-control">
+                <span>{t.sort}</span>
+                <select
+                  aria-label={t.sort}
+                  value={sort}
+                  onChange={(e) => setSort(e.target.value as Sort)}
+                >
+                  <option value="curated">{t.curated}</option>
+                  <option value="name">{t.name}</option>
+                  <option value="code">{t.code}</option>
+                </select>
+              </label>
+            </div>
+            <div className="category-area">
+              <div className="category-chips" aria-label={t.categories}>
+                <button
+                  className={category === 'all' ? 'chip active' : 'chip'}
+                  aria-pressed={category === 'all'}
+                  onClick={() => setCategory('all')}
+                >
+                  {t.allCategories}
+                </button>
+                {categories.map(([id, { label, count }]) => (
+                  <button
+                    key={id}
+                    className={category === id ? 'chip active' : 'chip'}
+                    aria-pressed={category === id}
+                    onClick={() => setCategory(id)}
+                  >
+                    {label}
+                    <small>{count}</small>
+                  </button>
+                ))}
+              </div>
+            </div>
+            {view === 'character' && (
+              <div className="portrait-filters">
+                <span>{t.hairLength}</span>
+                <div className="category-chips" role="group" aria-label={t.hairLength}>
+                  {(['all', 'short', 'medium', 'medium-long', 'long'] as const).map((key) => (
+                    <button
+                      key={key}
+                      className={hair === key ? 'chip active' : 'chip'}
+                      aria-pressed={hair === key}
+                      onClick={() => setHair(key)}
+                    >
+                      {key === 'all' ? t.allHair : t.hairLengths[key]}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+            <div className="result-toolbar">
+              <span>
+                {visible.length.toLocaleString(lang)} {t.results}
+                <span className="result-dot">·</span>
+                <span className="regular-label">{extended ? t.extended : t.filterHint}</span>
+                {(query || category !== 'all' || hair !== 'all') && (
+                  <button className="reset-inline" onClick={resetFilters}>
+                    {t.clear}
+                    <X size={12} />
+                  </button>
+                )}
+              </span>
+              {byView.some((item) => item.kind === 'pose') && (
+                <label className="angle-control">
+                  <span>{t.angle}</span>
+                  <select
+                    aria-label={t.angle}
+                    value={angle}
+                    onChange={(e) => {
+                      setAngle(e.target.value);
+                      setCardAngles({});
+                    }}
+                  >
+                    {angles.map((key) => (
+                      <option key={key} value={key}>
+                        {t[key]}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              )}
+            </div>
+
+            {!catalog ? (
+              <div className="status-state" role="status">
+                {failed ? (
+                  <>
+                    <Info size={28} />
+                    <h3>{t.loadError}</h3>
+                    <button className="primary-button" onClick={() => setReload((v) => v + 1)}>
+                      <RotateCcw size={15} />
+                      {t.retry}
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    <LoaderCircle className="spinner" size={28} />
+                    <p>{t.loading}</p>
+                  </>
+                )}
+              </div>
+            ) : visible.length === 0 ? (
+              <div className="status-state">
+                <div className="empty-symbol">
+                  {view === 'saved' && !query && category === 'all' ? (
+                    <Bookmark size={30} />
+                  ) : (
+                    <Search size={30} />
+                  )}
+                </div>
+                <h3>
+                  {view === 'saved' && !query && category === 'all' ? t.noSaved : t.noResults}
+                </h3>
+                <p>
+                  {view === 'saved' && !query && category === 'all'
+                    ? t.noSavedHint
+                    : t.noResultsHint}
+                </p>
+                <button
+                  className="secondary-button"
+                  onClick={() => {
+                    resetFilters();
+                    if (view === 'saved') changeView('all');
+                  }}
+                >
+                  {view === 'saved' ? t.introLink : t.clear}
+                  <ArrowRight size={15} />
+                </button>
+              </div>
+            ) : (
+              <>
+                <div className="reference-grid">
+                  {visible.slice(0, limit).map((item, index) => {
+                    const cardAngle = cardAngles[item.id] || angle;
+                    const preview =
+                      item.variants.find((v) => v.angle === cardAngle) || item.variants[0];
+                    const isSaved = saved.includes(item.id);
+                    return (
+                      <article className={`reference-card ${item.kind}-card`} key={item.id}>
+                        <div className="card-image-wrap">
+                          <button
+                            className="card-open"
+                            onClick={() => openDetail(item)}
+                            aria-label={`${t.detail}: ${item.title[lang]}`}
+                          >
+                            <RemoteImage
+                              src={preview.thumbnail}
+                              alt={item.title[lang]}
+                              lang={lang}
+                              eager={index < 4}
+                            />
+                            <span className="inspect-affordance">
+                              <ArrowUpRight size={20} />
+                            </span>
+                          </button>
+                          {item.kind === 'pose' && (
+                            <div className="pose-angle-strip" aria-label={t.angles}>
+                              {item.variants.map((variant) => (
+                                <button
+                                  key={variant.id}
+                                  type="button"
+                                  className={`pose-angle-thumb ${
+                                    variant.id === preview.id ? 'active' : ''
+                                  }`}
+                                  aria-label={variant.label[lang]}
+                                  aria-pressed={variant.id === preview.id}
+                                  onMouseEnter={() => setCardAngle(item.id, variant.angle)}
+                                  onFocus={() => setCardAngle(item.id, variant.angle)}
+                                  onClick={() => setCardAngle(item.id, variant.angle)}
+                                >
+                                  <span className="pose-angle-thumb-image">
+                                    <RemoteImage
+                                      src={variant.thumbnail}
+                                      alt=""
+                                      lang={lang}
+                                      eager={index < 4}
+                                    />
+                                  </span>
+                                  <span className="pose-angle-thumb-label">
+                                    {variant.label[lang]}
+                                  </span>
+                                </button>
+                              ))}
+                            </div>
+                          )}
+                          <span className="card-type">
+                            {item.kind === 'pose' ? (
+                              <PersonStanding size={13} />
+                            ) : item.kind === 'costume' ? (
+                              <Shirt size={13} />
+                            ) : (
+                              <UserRound size={13} />
+                            )}{' '}
+                            {item.kind === 'pose'
+                              ? 'POSE'
+                              : item.kind === 'costume'
+                                ? 'COSTUME'
+                                : 'CHARACTER'}
+                          </span>
+                          <button
+                            className={`save-button ${isSaved ? 'is-saved' : ''}`}
+                            aria-label={isSaved ? t.unsave : t.save}
+                            aria-pressed={isSaved}
+                            onClick={() => save(item)}
+                          >
+                            <Bookmark size={17} fill={isSaved ? 'currentColor' : 'none'} />
+                          </button>
+                          {item.kind === 'pose' && (
+                            <span className="view-count">
+                              <Layers2 size={12} />
+                              {item.variants.length} {t.views}
+                            </span>
+                          )}
+                        </div>
+                        <div className="card-meta">
+                          <div className="card-category">
+                            <span>{item.category[lang]}</span>
+                            <code>{item.code}</code>
+                          </div>
+                          <button className="card-title" onClick={() => openDetail(item)}>
+                            {item.title[lang]}
+                          </button>
+                          <div className="card-bottom">
+                            <span>
+                              {item.kind === 'character'
+                                ? item.series[lang]
+                                : item.kind === 'pose'
+                                  ? preview.label[lang]
+                                  : item.keywords[lang].split(' ').slice(0, 3).join(' · ')}
+                            </span>
+                            <button
+                              className={onBoard(item) ? 'add-pair selected' : 'add-pair'}
+                              aria-label={onBoard(item) ? t.removeBoard : t.addBoard}
+                              onClick={() => addToBoard(item)}
+                            >
+                              {onBoard(item) ? <Check size={15} /> : <Plus size={15} />}
+                            </button>
+                          </div>
+                        </div>
+                      </article>
+                    );
+                  })}
+                </div>
+                <div className="load-more">
+                  <p>
+                    {t.shown} {Math.min(limit, visible.length)} {t.of}{' '}
+                    {visible.length.toLocaleString(lang)}
+                  </p>
+                  {limit < visible.length ? (
+                    <button className="secondary-button" onClick={() => setLimit((v) => v + 24)}>
+                      {t.more}
+                      <ArrowDown size={15} />
+                    </button>
+                  ) : (
+                    <span>{t.end}</span>
+                  )}
+                </div>
+              </>
+            )}
+          </section>
+          <footer>
+            <span className="footer-wordmark">open.</span>
+            <p>{t.footer}</p>
+            <button onClick={() => setPanel('about')}>
+              {t.usage}
+              <ArrowUpRight size={13} />
+            </button>
+            <button
+              className="back-top"
+              aria-label={t.top}
+              onClick={() => window.scrollTo({ top: 0, behavior: 'smooth' })}
+            >
+              ↑
+            </button>
+          </footer>
+        </main>
+      </div>
+
+      {selected && variant && !generationJob && (
+        <Modal onClose={closeDetail} label={selected.title[lang]} className="detail-modal">
+          <div className="detail-stage">
+            <div className="detail-stage-top">
+              <span>
+                {selected.kind === 'pose'
+                  ? 'POSE STUDY'
+                  : selected.kind === 'costume'
+                    ? 'COSTUME STUDY'
+                    : 'CHARACTER STUDY'}{' '}
+                <code>/ {selected.code}</code>
+              </span>
+              <button
+                className="icon-button detail-mobile-close"
+                aria-label={t.close}
+                onClick={closeDetail}
+              >
+                <X size={21} />
+              </button>
+            </div>
+            <RemoteImage
+              src={variant.image}
+              alt={selected.title[lang]}
+              lang={lang}
+              className="detail-image"
+              eager
+              retryable
+            />
+            <div className="detail-pagination">
+              <button
+                className="icon-button"
+                disabled={selectedIndex <= 0}
+                aria-label={t.prev}
+                onClick={() => step(-1)}
+              >
+                <ChevronLeft size={22} />
+              </button>
+              <span>
+                {selectedIndex >= 0 ? `${selectedIndex + 1} / ${visible.length}` : selected.code}
+              </span>
+              <button
+                className="icon-button"
+                disabled={selectedIndex < 0 || selectedIndex >= visible.length - 1}
+                aria-label={t.next}
+                onClick={() => step(1)}
+              >
+                <ChevronRight size={22} />
+              </button>
+            </div>
+          </div>
+          <div className="detail-info">
+            <div className="detail-info-top">
+              <span className="detail-category">{selected.category[lang]}</span>
+              <button className="icon-button" aria-label={t.close} onClick={closeDetail}>
+                <X size={21} />
+              </button>
+            </div>
+            <code className="detail-code">{selected.id}</code>
+            <h2>{selected.title[lang]}</h2>
+            <p className="detail-series">{selected.series[lang]}</p>
+            {selected.kind === 'pose' && (
+              <div className="detail-angle-section">
+                <h3>{t.angles}</h3>
+                <div className="angle-buttons">
+                  {selected.variants.map((v) => (
+                    <button
+                      key={v.id}
+                      className={v.id === variant.id ? 'active' : ''}
+                      aria-label={v.label[lang]}
+                      aria-pressed={v.id === variant.id}
+                      onClick={() => setDetailAngle(v.angle)}
+                    >
+                      <span className="angle-thumbnail">
+                        <RemoteImage src={v.thumbnail} alt="" lang={lang} eager />
+                        {v.id === variant.id && (
+                          <span className="angle-selected">
+                            <Check size={10} />
+                          </span>
+                        )}
+                      </span>
+                      <span className="angle-label">{v.label[lang]}</span>
+                    </button>
+                  ))}
+                </div>
+                {variant.angle !== detailAngle && <p className="angle-missing">{t.missing}</p>}
+              </div>
+            )}
+            <div className="description-section">
+              <h3>{t.keywords}</h3>
+              <p>{selected.keywords[lang]}</p>
+              <div className="reference-description-actions">
+                <button className="text-action" onClick={() => clipboard(selected.keywords[lang])}>
+                  <Copy size={14} />
+                  {t.copyPrompt}
+                </button>
+                {selected.kind !== 'character' && (
+                  <AnimaActions
+                    lang={lang}
+                    onCopy={clipboard}
+                    input={
+                      selected.kind === 'pose'
+                        ? { pose: selected, angle: variant.angle }
+                        : { costume: selected }
+                    }
+                  />
+                )}
+                <button
+                  className="text-action reference-generate"
+                  disabled={!imageReady || characterLoading}
+                  onClick={() => beginGeneration(selected)}
+                >
+                  <Sparkles size={14} />
+                  {generationCopy[lang].generate}
+                </button>
+                {!imageReady && (
+                  <span className="reference-generate-hint">
+                    {generationCopy[lang].configureFirst}
+                  </span>
+                )}
+              </div>
+            </div>
+            <div className="detail-actions">
+              <button className="primary-button" onClick={() => addToBoard(selected)}>
+                {onBoard(selected) ? <Check size={17} /> : <Plus size={17} />}{' '}
+                {onBoard(selected) ? t.removeBoard : t.addBoard}
+              </button>
+              <div className="detail-action-row">
+                <button className="secondary-button" onClick={() => save(selected)}>
+                  <Bookmark
+                    size={16}
+                    fill={saved.includes(selected.id) ? 'currentColor' : 'none'}
+                  />
+                  {saved.includes(selected.id) ? t.unsave : t.save}
+                </button>
+                <button
+                  className="secondary-button"
+                  onClick={() => downloadOriginal(selected, variant)}
+                  disabled={downloadBusy}
+                  aria-busy={downloadBusy}
+                  aria-label={downloadBusy ? t.downloading : t.downloadOriginal}
+                  title={downloadBusy ? t.downloading : t.downloadOriginal}
+                >
+                  {downloadBusy ? (
+                    <LoaderCircle size={16} className="spinner" />
+                  ) : (
+                    <Download size={16} />
+                  )}
+                </button>
+                <button
+                  className="secondary-button"
+                  onClick={() => clipboard(window.location.href)}
+                  aria-label={t.copyLink}
+                  title={t.copyLink}
+                >
+                  <Copy size={16} />
+                </button>
+              </div>
+              <a
+                className="original-link"
+                href={variant.original}
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                {t.original}
+                <ExternalLink size={15} />
+              </a>
+              <p className="original-note">{t.originalNote}</p>
+            </div>
+            <p className="key-hint">{t.keys}</p>
+          </div>
+        </Modal>
+      )}
+
+      {panel === 'board' && !generationJob && (
+        <Modal onClose={() => setPanel(null)} label={t.board} className="board-modal">
+          <div className="panel-heading">
+            <div>
+              <span className="section-kicker">THE PAIRING BOARD</span>
+              <h2>{activeCharacter ? t.boardCharacterTitle : t.boardTitle}</h2>
+            </div>
+            <button className="icon-button" aria-label={t.close} onClick={() => setPanel(null)}>
+              <X size={22} />
+            </button>
+          </div>
+          <p className="panel-description">{t.boardDescription}</p>
+          <div className="board-slots">
+            {(['pose', 'costume'] as const).map((kind) => {
+              const item = kind === 'pose' ? boardPose : boardCostume;
+              return (
+                <div className="board-slot" key={kind}>
+                  <div className="board-slot-heading">
+                    <span>
+                      {kind === 'pose' ? <PersonStanding size={16} /> : <Shirt size={16} />}{' '}
+                      {kind === 'pose' ? t.pose : t.costume}
+                    </span>
+                    {item && (
+                      <button
+                        className="icon-button"
+                        aria-label={`${t.remove}: ${item.title[lang]}`}
+                        onClick={() => setBoard((old) => ({ ...old, [kind]: undefined }))}
+                      >
+                        <X size={15} />
+                      </button>
+                    )}
+                  </div>
+                  {item ? (
+                    <>
+                      <RemoteImage
+                        src={item.variants[0].thumbnail}
+                        alt={item.title[lang]}
+                        lang={lang}
+                      />
+                      <h3>{item.title[lang]}</h3>
+                      <code>{item.id}</code>
+                    </>
+                  ) : (
+                    <div className="board-empty">
+                      {kind === 'pose' ? (
+                        <PersonStanding size={46} strokeWidth={1} />
+                      ) : (
+                        <Shirt size={44} strokeWidth={1} />
+                      )}
+                      <p>{kind === 'pose' ? t.poseEmpty : t.costumeEmpty}</p>
+                      <button
+                        className="secondary-button"
+                        onClick={() => {
+                          setPanel(null);
+                          changeView(kind);
+                          document
+                            .getElementById('collection')
+                            ?.scrollIntoView({ behavior: 'smooth' });
+                        }}
+                      >
+                        {kind === 'pose' ? t.choosePose : t.chooseCostume}
+                        <ArrowRight size={14} />
+                      </button>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+          <section
+            className="board-character"
+            aria-label={t.characterOptional}
+            aria-busy={characterLoading}
+          >
+            <input
+              ref={characterInput}
+              type="file"
+              accept="image/png,image/jpeg,image/webp"
+              aria-label={t.characterUpload}
+              hidden
+              onChange={(event) => {
+                const file = event.target.files?.[0];
+                event.target.value = '';
+                if (file) void selectCharacter(file);
+              }}
+            />
+            <div className="board-character-row">
+              {activeCharacter ? (
+                <img
+                  className="board-character-preview"
+                  src={activeCharacter.variant.thumbnail}
+                  alt={generationCopy[lang].character}
+                />
+              ) : (
+                <div className="board-character-placeholder">
+                  <UserRound size={25} strokeWidth={1.5} />
+                </div>
+              )}
+              <div className="board-character-description">
+                <h3>{t.characterOptional}</h3>
+                <p className="board-character-filename">
+                  {characterReference
+                    ? characterReference.file.name
+                    : activeCharacter
+                      ? activeCharacter.title[lang]
+                      : t.characterFormats}
+                </p>
+              </div>
+              <div className="board-character-actions">
+                <button
+                  type="button"
+                  className="secondary-button"
+                  onClick={() => {
+                    setPanel(null);
+                    changeView('character');
+                    document.getElementById('collection')?.scrollIntoView({ behavior: 'smooth' });
+                  }}
+                >
+                  <UserRound size={15} />
+                  {t.chooseCharacter}
+                </button>
+                <button
+                  type="button"
+                  className="secondary-button"
+                  disabled={characterLoading}
+                  onClick={() => characterInput.current?.click()}
+                >
+                  {characterLoading ? (
+                    <LoaderCircle size={15} className="spinner" />
+                  ) : (
+                    <ImagePlus size={15} />
+                  )}
+                  {characterLoading
+                    ? t.characterLoading
+                    : activeCharacter
+                      ? t.characterReplace
+                      : t.characterUpload}
+                </button>
+                {activeCharacter && (
+                  <button
+                    type="button"
+                    className="icon-button"
+                    disabled={characterLoading}
+                    aria-label={t.characterRemove}
+                    onClick={() => {
+                      characterTask.current++;
+                      setCharacterReference(null);
+                      setBoard((old) => ({ ...old, character: undefined }));
+                      setCharacterError('');
+                    }}
+                  >
+                    <X size={17} />
+                  </button>
+                )}
+              </div>
+            </div>
+            <p className="board-character-note">
+              {characterReference ? t.characterPrivacy : t.characterLibraryNote}
+            </p>
+            {characterError && (
+              <p className="board-character-error" role="alert">
+                {generationCopy[lang][characterError as keyof typeof generationCopy.zh] ||
+                  generationCopy[lang].characterInvalid}
+              </p>
+            )}
+          </section>
+          <div className="board-prompt">
+            <h3>{t.boardPrompt}</h3>
+            <p>{boardPrompt || t.boardIncomplete}</p>
+            <div className="reference-description-actions">
+              <button
+                className="primary-button"
+                disabled={!boardPrompt}
+                onClick={() => clipboard(boardPrompt)}
+              >
+                <Copy size={16} />
+                {t.copyPrompt}
+              </button>
+              <AnimaActions
+                lang={lang}
+                onCopy={clipboard}
+                input={{
+                  pose: boardPose,
+                  costume: boardCostume,
+                  angle: boardPose?.variants[0]?.angle,
+                }}
+              />
+              <button
+                className="secondary-button"
+                disabled={!imageReady || characterLoading}
+                onClick={() => beginGeneration()}
+              >
+                <Sparkles size={16} />
+                {generationCopy[lang].generate}
+              </button>
+              {!imageReady && (
+                <span className="reference-generate-hint">
+                  {generationCopy[lang].configureFirst}
+                </span>
+              )}
+            </div>
+          </div>
+        </Modal>
+      )}
+
+      {panel === 'settings' && (
+        <ImageSettings
+          config={imageConfig}
+          lang={lang}
+          onClose={() => setPanel(null)}
+          onSave={(config) => {
+            setImageConfig(config);
+            setPanel(null);
+            notify(generationCopy[lang].saved);
+          }}
+          onClear={() => {
+            setImageConfig({ ...defaultImageConfig });
+            setPanel(null);
+            notify(generationCopy[lang].cleared);
+          }}
+        />
+      )}
+      {generationJob && (
+        <GenerationDialog
+          job={generationJob}
+          lang={lang}
+          onClose={closeGeneration}
+          onRun={(prompt) => void runGeneration(generationJob.references, prompt)}
+        />
+      )}
+
+      {panel === 'about' && (
+        <Modal onClose={() => setPanel(null)} label={t.usage} className="about-modal">
+          <div className="panel-heading">
+            <div>
+              <span className="section-kicker">HOW TO USE</span>
+              <h2>{t.aboutTitle}</h2>
+            </div>
+            <button className="icon-button" aria-label={t.close} onClick={() => setPanel(null)}>
+              <X size={22} />
+            </button>
+          </div>
+          <p>{t.aboutIntro}</p>
+          <h3>{t.aboutHowToTitle}</h3>
+          <ul className="usage-steps">
+            {t.aboutSteps.map((step) => (
+              <li key={step}>{step}</li>
+            ))}
+          </ul>
+          <h3>{t.aboutUseTitle}</h3>
+          <p>
+            {t.aboutUse}
+            <strong className="usage-restriction">{t.aboutRestriction}</strong>
+          </p>
+          <p>{t.aboutRights}</p>
+          <p>{t.aboutCaveat}</p>
+        </Modal>
+      )}
+      {toast && (
+        <div className="toast" role="status">
+          <Check size={16} />
+          {toast}
+        </div>
+      )}
+    </div>
+  );
+}

@@ -1,0 +1,12 @@
+node_modules/
+dist/
+.DS_Store
+test-results/
+playwright-report/
+.env*
+!.env.example
+*.tsbuildinfo
+artifacts/
+/data/image-download-manifest.json*
+/data/image-download-summary.json
+/data/image-download.lock

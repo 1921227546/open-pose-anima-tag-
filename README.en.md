@@ -1,0 +1,164 @@
+# Open Pose & Costume
+
+[中文](README.md) · **English**
+
+[Live demo](https://hongye007.github.io/open-pose-costume/) · [Character generation skill](https://github.com/hongye007/open-pose-costume-skill)
+
+- **Free trial instructions**: [Read the Feishu guide](https://my.feishu.cn/wiki/DuwOwjo0oiUrMAkVY8McigKcnsh)
+- **Author on X**: [@HongyeMain](https://x.com/HongyeMain)
+
+From pose and outfit, to character. A bilingual reference studio for character design, drawing practice and AI creation: find references, pair a pose with an outfit, generate a character and compare the result.
+
+![Open Pose & Costume English homepage: pose, costume and character references combined into a generated character](docs/images/hero-character-workflow-en.webp)
+
+**288 pose groups · 1,439 pose views · 1,407 outfits · 1,499 character references · 4,345 reference images**
+
+Counts include extended categories. Data updated on October 30, 2026 (Asia/Shanghai).
+
+## Browse and save
+
+- **Bilingual search**: find references by name, keyword, ID or multiple terms, across Chinese and English.
+- **Categories and angles**: filter and sort poses or costumes, switch pose angles, and view thumbnails or originals. Enable extended categories when needed.
+- **Favorites and sharing**: favorites and pairings stay in your browser. Share links preserve language, filters and reference selections.
+- **Easy browsing**: responsive layout, lazy-loaded images and incremental loading. Press `/` to search, `←` / `→` to navigate in the detail view, and `Esc` to close it.
+
+![English reference library with categories, search, angles and favorites](docs/images/library-en.webp)
+
+## Two references. One character.
+
+Choose a pose and an outfit, then add them to the pairing board. Optionally choose a character from the library or upload your own. The description updates with your selections and can be copied for your creative workflow or another image tool.
+
+The character library includes **893 face and 606 styling references**, with bilingual search, hair-length filters, favorites, original previews and downloads. Only hair length has complete source classifications; some style descriptions mention hair color, but dedicated eye-color, hair-color and skin-tone labels are unavailable.
+
+![English pairing board with pose, costume, description and generation controls](docs/images/pairing-en.webp)
+
+### Anima tags
+
+Three extra buttons sit next to **Copy original prompt** and emit prompts for [Anima 1.0 Base](https://huggingface.co/circlestone-labs/Anima) (CircleStone Labs, Cosmos DiT with a Qwen3 text encoder):
+
+| Button | Output |
+| --- | --- |
+| 📋 Copy original prompt | The original natural-language description, unchanged |
+| 🏷️ Copy Anima tags | Danbooru-style tags: quality, subject, pose, viewpoint, outfit, style |
+| ✨ Copy Anima mixed prompt | The tag line plus two or three English sentences, matching the official mixed formula |
+| 🚫 Copy Anima negative | The recommended negative prompt; Anima uses a real negative branch when CFG > 1 |
+
+Tags are derived locally from `data/anima-lexicon.json`; the reference library, images and build pipeline are untouched. Pose tags come from the category plus the English title, viewpoint tags from the selected angle (`from below`, `from above`), and outfit tags from the costume keywords. Poses added by a later sync are covered by the same vocabulary, so a copy never comes back empty, and individual poses can be corrected by ID in the `overrides` map. Switch to another tag dialect, such as Illustrious or NoobAI, by editing that one file.
+
+### Generate from references
+
+1. Open settings in the upper-right corner and enter your service URL, API key, model, image size and quality.
+2. Select **both a pose and a costume** on the pairing board, optionally choose or upload a **character reference** to preserve identity and visual style, then click “Generate from references.” Missing pose or costume references prompt you to complete the selection.
+3. Wait for the result. Edit the description to generate again, or retry manually if a request fails.
+4. Use the pose, costume or character thumbnails on the left to select the comparison reference, and switch between “Side by side” and “Overlay.”
+
+| Setting          | Default or requirement                                                                       |
+| ---------------- | -------------------------------------------------------------------------------------------- |
+| Service URL      | `https://atomflow.vip`, editable                                                             |
+| Model            | `gpt-image-2`, editable                                                                      |
+| Endpoint         | `POST /v1/images/edits`, OpenAI-compatible multipart format                                  |
+| Reference images | Two originals (pose and costume), or three with an optional character, uploaded as `image[]` |
+| Browser access   | Service must allow CORS; use HTTPS or a local HTTP address                                   |
+
+Settings stay in your browser. The API key is stored only for the current session by default; enabling “Remember key” stores it locally. You can clear it in settings. During generation, the browser sends references and the description directly to your configured service, which may charge for usage. Keys are excluded from share links and the repository.
+
+Library selections are saved as reference IDs in this browser. Lists use thumbnails; details and generation use original remote PNGs. Character references control identity and appearance, while pose and costume references control gesture and clothing.
+
+Uploaded character references support PNG, JPG and WebP up to 10 MB. The image stays in page memory when the board closes, and clears on page reload or close. It is excluded from browser storage, share links and the repository, and sent to your configured service only when you generate.
+
+**Side by side**: view the selected reference beside the generated result.
+
+![Side-by-side example: pose, costume and character references, with the original pose beside the generated result](docs/images/generation-character-side-by-side-en.webp)
+
+**Overlay**: drag the divider within a single frame, with the generated image on the left and the selected reference on the right. Arrow keys and Home / End are supported.
+
+![Overlay example: pose, costume and character references, with a slider comparing the generated image and original pose](docs/images/generation-character-overlay-en.webp)
+
+These are example outputs. Results depend on the model, description and service configuration.
+
+## Companion skill
+
+[open-pose-costume-skill](https://github.com/hongye007/open-pose-costume-skill) combines pose, costume and character references into one character image through natural-language requests in Codex. Browse and select references on this website, then use the skill to generate a character. See the skill repository's bilingual README for installation, examples and image service configuration.
+
+## Run locally
+
+Requires **Node.js 22.12+**.
+
+```sh
+npm ci
+npm run dev
+```
+
+Open <http://127.0.0.1:5199>. Strict port checking is enabled, so startup exits if the port is occupied. Check availability before starting, or choose another free port:
+
+```sh
+npm run dev -- --port 5200
+```
+
+Check with `lsof -nP -iTCP:5200 -sTCP:LISTEN` on macOS/Linux, or `Get-NetTCPConnection -LocalPort 5200` in Windows PowerShell.
+
+## Build and deploy
+
+The site is deployed on [GitHub Pages](https://hongye007.github.io/open-pose-costume/). Pushes to `main` automatically run tests, build with `/open-pose-costume/` as the base path, and deploy through GitHub Actions. Failed tests or builds prevent deployment. Other branches and pull requests only run checks.
+
+CI uses sparse checkout to skip downloading and checking out the `pose/` and `costume/` image archives while retaining files needed for tests and builds.
+
+Built with **React 19 · TypeScript · Vite · Lucide**. The reference library is a static website; image generation requires your own service configuration.
+
+```sh
+npm run build
+```
+
+Deploy `dist/` to a static host. For Cloudflare Pages, use `npm run build` as the build command and `dist` as the output directory. `public/_headers` supplies cache and security headers on Cloudflare Pages; GitHub Pages does not read this file.
+
+Choose a free port for local preview as well:
+
+```sh
+npm run preview -- --port 5200
+```
+
+## Data and maintenance
+
+The website loads images directly from the source sites, so availability depends on those sites. Local image archives do not change the URLs used by the website.
+
+Character metadata comes from [AI Portrait Gallery](https://ai-portrait-gallery.pages.dev/). Portrait thumbnails and originals are not downloaded or archived in this repository and are excluded from `images:download`.
+
+| Command                   | Purpose                                                                           |
+| ------------------------- | --------------------------------------------------------------------------------- |
+| `npm run sync`            | Sync upstream metadata without executing upstream page code or downloading images |
+| `npm run data:build`      | Rebuild the website index from local snapshots                                    |
+| `npm test`                | Run tests                                                                         |
+| `npm run build`           | Type-check and build the website                                                  |
+| `npm run images:download` | Optional: archive covers and originals from all categories locally                |
+
+Metadata snapshots live in `data/source/`, the website index in `public/data/catalog.json`, and sync records in `data/sync-manifest.json`. Sync checks categories, angles and translation coverage. If translations are missing, update the dictionaries indicated by the error.
+
+<details>
+<summary>Image archives and brand assets</summary>
+
+The archive retains every available pose angle. The current dataset produces 5,692 files:
+
+```text
+pose/
+  covers/       # 1,439 JPG thumbnails
+  originals/    # 1,439 PNG originals
+costume/
+  covers/       # 1,407 WebP thumbnails
+  originals/    # 1,407 PNG originals
+```
+
+Covers and originals are tracked in Git, totaling approximately 1.95 GiB. The archives are excluded from site builds; the website continues to use upstream image URLs. The maintainer confirms additional permission from the original creator for public redistribution in this repository. Images are not covered by the code's MIT license; see [SOURCES.md](SOURCES.md).
+
+Downloads support SHA-256 verification, retries and reuse of existing files. Default concurrency is 8; adjust it with `npm run images:download -- --concurrency 4`. The manifest and summary are written to `data/image-download-manifest.json` and `data/image-download-summary.json`. Download records remain ignored by Git.
+
+See the [original logo](output/imagegen/open-pose-costume-logo-original.png) and [generation prompt](assets/brand/logo-prompt.txt). With Python Pillow and NumPy installed, run `python3 scripts/build-brand-assets.py` to generate the transparent mark, favicon and Apple touch icon.
+
+</details>
+
+## License and credits
+
+The portrait source states [CC0 1.0](https://creativecommons.org/publicdomain/zero/1.0/) while requesting no republication or redistribution of image data. Portraits depict fictional AI-generated people. Both statements are recorded in [SOURCES.md](SOURCES.md).
+
+Project code uses the [MIT license](LICENSE). Images, upstream data and third-party translations retain their respective rights and are not covered by the code license. The pose and costume source terms allow reference, editing and commercial work production, but prohibit redistribution, republication or resale of the image data itself, including edited copies. See [SOURCES.md](SOURCES.md) and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for attribution and full usage restrictions.
+
+Thanks to the original pose and costume creator and the Chinese translation contributors.
